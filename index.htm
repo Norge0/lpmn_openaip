@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <!-- this enables mobile view-->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+    <meta name="apple-mobile-web-app-capable" content="yes"/>
+    <meta charset="utf-8"/>
+
+    <title>Airspace Map (source: openAIP)</title>
+    <link rel="apple-touch-icon" href="touch-icon-iphone.png"/>
+
+    <link rel="stylesheet" href="mapviewer.css" type="text/css"/>
+   
+	<link rel="stylesheet" href="libraries/leaflet/leaflet.css" type="text/css"/>
+
+
+    <script type="text/javascript"
+            src="libraries/jquery-ui/js/jquery-1.10.2.js"></script>
+    <script type="text/javascript"
+            src="libraries/leaflet/leaflet.js"></script>
+
+    <script type="text/javascript"
+            src="libraries/jquery-ui/js/jquery-ui-1.10.4.min.js"></script>
+    <script type="text/javascript"
+            src="libraries/flot/jquery.flot.js"></script>
+    <script type="text/javascript"
+            src="libraries/flot/jquery.flot.resize.js"></script>
+
+</head>
+
+
+
+<body>
+
+<div id="wrapper">
+    <div id="map"></div>
+    </div>
+    
+
+    <!-- /layout -->
+
+    <script type="text/javascript">
+
+        // GLOBALS ####################################
+        var trackTargetUID = null;
+        var perfData = null;
+        var baroPlotPoints = new Array();
+        var baroPlotMaxAlt = 0;
+        var groundPlotPoints = new Array();
+        //var userDestination;
+        var activeSearchFilter = "rwy";
+        var currentBBOX = null;
+
+        $(document).ready(function () {
+
+            var intvalUpdateTrackingLayer = setInterval(updateTrackingData, 5000);
+
+            //BASE MAPS
+            //osm opencyclemap physical
+            //var opencyclemap_phys_osm = new L.TileLayer('http://{s}.tile.thunderforest.com/landscape/{z}/{x}/{y}.png?apikey=f09a38fa87514de4890fc96e7fe8ecb1', {
+            //    maxZoom: 14,
+            //    minZoom: 4,
+            //    format: 'image/png',
+            //    transparent: true
+            //});
+            var osm = new L.TileLayer('http://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 14,
+                minZoom: 4,
+                format: 'image/png',
+                transparent: true,
+                subdomains: ['a', 'b', 'c']
+            });
+
+            var openaip_cached_basemap = new L.TileLayer("http://{s}.tile.maps.openaip.net/geowebcache/service/tms/1.0.0/openaip_basemap@EPSG%3A900913@png/{z}/{x}/{y}.png", {
+                maxZoom: 14,
+                minZoom: 4,
+                tms: true,
+                detectRetina: true,
+                subdomains: '12',
+                format: 'image/png',
+                transparent: true
+            });
+
+//        //define mapnik osm
+//        var mapnik_osm = new L.TileLayer("http://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+//            maxZoom:14,
+//            minZoom:4,
+//            format:'image/png',
+//            transparent:true,
+//            attribution:"OpenStreetMap &copy; OpenStreetmap.org <a href=\"http://www.openstreetmap.org\" target=\"_blank\" style=\"\">OpenStreetMap contributors</a>, <a href=\"http://creativecommons.org/licenses/by-sa/2.0/\" target=\"_blank\">CC-BY-SA</a>"
+//        });
+
+
+
+
+
+
+//MAPA MAPA MAPA MAPA MAPA MAPA ################
+            
+            //initialize map object ####################################
+            //determine center of map
+            var params = getUrlParams();
+//  if (params.destination) {
+//    userDestination = params.destination;
+//  }
+            if (!isEmpty(params.lat) && !isEmpty(params.lon)) {
+                var initMapCenter = [params.lat, params.lon];
+                var initMapZoom = 10;
+                var showOnMap = true; // user pressed show on map button on openaip node view. Do not start location search!
+            }
+            else {
+				// lat long LPMN
+                var initMapCenter = [38.71, -8.27];
+                var initMapZoom = 11;
+            }
+
+            var southWest = new L.LatLng(-90, -180),
+                northEast = new L.LatLng(90, 180),
+                maxExtent = new L.LatLngBounds(southWest, northEast);
+            // var openaip_basemap_mapnik_osm = L.layerGroup([mapnik_osm, openaip_cached_basemap]);
+            var openaip_basemap_phys_osm = L.featureGroup([osm, openaip_cached_basemap]);
+            var map = new L.Map('map', {
+                layers: [openaip_basemap_phys_osm],
+                center: initMapCenter, //center to Butterfly coordinates (Sadhausen)
+                zoom: initMapZoom,
+                crs: L.CRS.EPSG900913,
+                attributionControl: false, 
+                maxBounds: maxExtent,
+                scrollWheelZoom: true //original � false
+
+            });
+            var attrib = L.control.attribution({position: 'bottomleft'});
+            attrib.addAttribution("<a href=\"https://www.openaip.net\" target=\"_blank\" style=\"\">openAIP</a>");
+            attrib.addAttribution("<a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\" style=\"\">© OpenStreetMap</a> contributors");
+            attrib.addAttribution("<a href=\"https://www.openweathermap.org\" target=\"_blank\" style=\"\">OpenWeatherMap</a>");
+
+            attrib.addTo(map);
+
+            //layer control handling
+            var baseMaps = {
+                "openAIP Map": openaip_basemap_phys_osm
+//    "OpenStreetMap":openaip_basemap_mapnik_osm
+            };
+            var overlayMaps = {
+                "OWM Precipitation": openaip_ext_owm_precipitation,
+                "OWM Sea level pressure": openaip_ext_owm_pressurenn,
+                "openAIP Hotspots": openaip_cached_hotspot,
+                "openAIP Tracking": trackingLayer
+
+            };
+            map.addLayer(tracklineLayer);
+
+            setCurrentBBOX(); //init bbox
+
+            //EVENTS ####################################
+            map.on('moveend', showAirspaceLabels);
+            map.on('zoomend', showAirspaceLabels);
+            map.on('moveend', setCurrentBBOX);
+            map.on('zoomend', function (e) {
+                trackingLayer.eachLayer(function (layer) {
+                    var size = getSize();
+                    layer.options.icon.options.iconSize = [parseInt(size), parseInt(size)];
+                    layer.options.icon.options.iconAnchor = [parseInt(size) / 2, parseInt(size) / 2];
+                })
+            });
+            map.on('layerremove', function (e) {
+                if (!map.hasLayer(trackingLayer)) {
+                    map.removeLayer(crowdedAreasLayer);
+                    _hideGraph();
+                }
+            });
+
+            if (showOnMap == true) {
+                //defines yellow semi-transparent circle
+                var showOnMapMarker = new L.Circle([params.lat, params.lon], 2000, {
+                    fillColor: '#ffec00',
+                    stroke: false
+                }); //new user location marker
+                map.addLayer(showOnMapMarker);
+            }
+            else {
+                markerUserLocation(); //mark user location on the map
+            }
+
+            $('#search').autocomplete({
+                source: function (request, response) {
+                    $.ajax({
+                        url: "searchOptions.php",
+                        dataType: "json",
+                        data: {
+                            term: request.term,
+                            filter: activeSearchFilter,
+                            bbox: currentBBOX
+                        },
+                        success: function (data) {
+                            response(data);
+                        }
+                    });
+                },
+                minLength: 2,
+                select: function (event, ui) {
+                    $(this).val(ui.item.label);
+                    return false;
+                },
+                change: function () {
+                    $(this).val('');
+                },
+                close: function () {
+                    $(this).val('')
+                }
+            });
+
+            $("#search").on("autocompleteselect", function (event, ui) {
+                map.setView(ui.item.value, 11);
+                jQuery(this).val('');
+            });
+
+            $(".close-window").click(function (element) {
+                _hideGraph();
+            });
+
+            $('#mapManipulator').click(function () {
+                markerUserLocation()
+            });
+
+
+            //on exit, redirect
+//  $(".handle.exit").click(function () {
+//    if (!isEmpty(userDestination)) {
+//      window.location = userDestination;
+//    }
+//    else {
+//      window.location = 'http://www.openaip.net';
+//    }
+//  });
+
+ 
+            // COMMON FUNCTIONS ####################################
+            function updateTrackingData() { //loops
+                if (map.hasLayer(trackingLayer)) {
+                    if (perfData != null && $("#graph-container").hasClass('graph-open')) {
+                        _updatePerfData();
+                        _printBaroPlot();
+                    }
+                    getTrackingData();
+                    getCrowdedAreasData();
+                }
+                else {
+                    _hideGraph();
+                }
+            }
+
+            function getTrackingData() {
+                trackingLayer.clearLayers();
+                if (map.getZoom() > 5 && map.hasLayer(trackingLayer)) {
+                    $.getJSON('https://maps.openaip.net/service/public/livedata/wfs?SERVICE=WFS&VERSION=1.0.0&REQUEST=GetFeature&bbox=' + currentBBOX + '&TYPENAME=tracktor_positions&outputformat=geojson', function (data) {
+                        var jsonData = data;
+                        trackingLayer.addData(jsonData);
+                        trackingLayer.eachLayer(function (layer) {
+                            //check if a UID is currently tracked, if yes, add this point to trackline and update it
+                            if ($("#graph-container").hasClass('graph-open') && this.trackTargetUID != null && !isNaN(this.trackTargetUID) && this.trackTargetUID == layer.feature.properties.uid) {
+                                //set perfdata
+                                perfData = layer.feature;
+//                        if (layer.feature.properties.calc_flightstatus == 2) {
+//                            //update trackline only if target is in flight
+//                            var lon = layer.feature.geometry.coordinates[0];
+//                            var lat = layer.feature.geometry.coordinates[1];
+//                            var polyPoint = new L.LatLng(lat, lon);
+//
+//                            var points = new Array();
+//                            trackline = L.polyline(points,
+//                                {
+//                                    weight: 4,
+//                                    opacity: 0.8,
+//                                    color: '#ffa633',
+//                                    smoothFactor: 2.0
+//                                });
+//
+//                            trackline.addLatLng(polyPoint);
+//                        }
+                                //center map to tracked target
+                                //map.panTo(polyPoint);
+                            }
+                        });
+                    });
+                }
+            }
+
+            function getTracklineTarget() {
+                var uid = this.trackTargetUID;
+                if (map.getZoom() > 5 && map.hasLayer(trackingLayer) && uid) {
+                    $.getJSON('https://maps.openaip.net/service/public/livedata/wfs?&VERSION=1.0.0&SERVICE=WFS&REQUEST=GetFeature&TYPENAME=tracktor_trackpoints&Filter=%3CFilter%3E%3CPropertyIsEqualTo%3E%3CPropertyName%3Euid%3C/PropertyName%3E%3CLiteral%3E' + this.trackTargetUID + '%3C/Literal%3E%3C/PropertyIsEqualTo%3E%3C/Filter%3E&OUTPUTFORMAT=geojson', function (data) {
+                        //build trackline
+                        var points = new Array();
+                        var features = data.features;
+                        for (var i = 0; i < features.length; i++) {
+                            var lon = features[i].geometry.coordinates[0];
+                            var lat = features[i].geometry.coordinates[1];
+
+
+                            console.log(lon);
+                            console.log(lat);
+
+
+                            var polyPoint = new L.LatLng(lat, lon);
+                            points.push(polyPoint);
+
+                            var alt = parseInt(features[i].properties.gps_alt);
+                            if (alt > baroPlotMaxAlt) {
+                                baroPlotMaxAlt = alt;
+                            }
+                            var timestamp = features[i].properties.gps_timestamp;
+                            baroPlotPoints.push([timestamp, alt]);
+
+                            var calc_elev_gnd = parseInt(features[i].properties.calc_elev_gnd);
+                            groundPlotPoints.push([timestamp, calc_elev_gnd]);
+                        }
+                        trackline = L.polyline(points,
+                            {
+                                weight: 4,
+                                opacity: 0.8,
+                                color: '#ffa633',
+                                smoothFactor: 2.0
+                            });
+
+
+                        console.log(trackline);
+
+                        tracklineLayer.clearLayers();
+                        tracklineLayer.addLayer(trackline);
+
+                        _printBaroPlot();
+
+                    });
+                }
+            }
+
+            function getCrowdedAreasData() {
+                map.addLayer(crowdedAreasLayer);
+                crowdedAreasLayer.clearLayers();
+                if (map.getZoom() > 5 && map.hasLayer(trackingLayer)) {
+                    $.getJSON('https://maps.openaip.net/service/public/livedata/wfs?SERVICE=WFS&VERSION=1.0.0&REQUEST=GetFeature&bbox=' + currentBBOX + '&TYPENAME=livedata_services_crowded_areas&outputformat=geojson', function (data) {
+                        var jsonData = data;
+                        var crowdedAreasStyle = {
+                            "stroke": false,
+                            "fillColor": "#ffef1d",
+                            "fillOpacity": "0.4",
+                            "weight": 5,
+                            "opacity": 0.65,
+                            "smoothFactor": 2
+                        };
+                        //smaller 10 #ffef1d
+                        // greater 10, smaller 20 #ff951d
+                        // greater 20 #ff951d
+                        var crowdedAreasPolygons = new L.geoJson(jsonData, {
+                            style: function (feature) {
+                                ac_count = parseInt(feature.properties.ac_count);
+                                switch (true) {
+                                    case (ac_count <= 10) :
+                                        return {
+                                            "stroke": false,
+                                            "fillColor": "#ffef1d",
+                                            "fillOpacity": "0.4",
+                                            "weight": 5,
+                                            "opacity": 0.65,
+                                            "smoothFactor": 2
+                                        };
+                                        break;
+                                    case (ac_count > 10 && ac_count <= 20):
+                                        return {
+                                            "stroke": false,
+                                            "fillColor": "#ff951d",
+                                            "fillOpacity": "0.4",
+                                            "weight": 5,
+                                            "opacity": 0.65,
+                                            "smoothFactor": 2
+                                        };
+                                        break;
+                                    case (ac_count > 10):
+                                        return {
+                                            "stroke": false,
+                                            "fillColor": "#ef1b33",
+                                            "fillOpacity": "0.4",
+                                            "weight": 5,
+                                            "opacity": 0.65,
+                                            "smoothFactor": 2
+                                        };
+                                        break;
+                                }
+                            }
+                        })
+                        crowdedAreasLayer.addLayer(crowdedAreasPolygons);
+                    });
+                }
+            }
+
+            function _printBaroPlot() {
+                $.plot("#graph-view", [
+                        {
+                            data: baroPlotPoints,
+                            lines: {
+                                show: true
+                            },
+                            points: {
+                                show: false
+                            },
+                            shadowSize: 0
+                        },
+                        {
+                            data: groundPlotPoints,
+                            lines: {
+                                show: true,
+                                fill: true,
+                                fillColor: "rgba(97, 105, 132, 0.8)"
+                            },
+                            shadowSize: 0
+                        }
+                    ],
+                    { //get initial data
+                        yaxis: {
+                            min: 0,
+                            max: baroPlotMaxAlt + 150
+                        },
+                        xaxis: {
+                            show: true,
+                            tickFormatter: plotTimeformatter
+                        },
+                        grid: {
+                            color: '#404040',      // => primary color used for outline and labels
+                            backgroundColor: null, // => null for transparent, else color
+                            tickColor: '#656565',  // => color used for the ticks
+                            labelMargin: 3,        // => margin in pixels
+                            verticalLines: true,   // => whether to show gridlines in vertical direction
+                            horizontalLines: true, // => whether to show gridlines in horizontal direction
+                            outlineWidth: 1        // => width of the grid outline/border in pixels
+                        }
+                    });
+            };
+
+            function plotTimeformatter(val, axis) {
+                return timestampToTime(val);
+            }
+
+            function _updatePerfData() {
+                if (parseInt(perfData.properties.gps_alt) > baroPlotMaxAlt) {
+                    baroPlotMaxAlt = parseInt(perfData.properties.gps_alt);
+                }
+                if (perfData.properties.calc_flightstatus == 2) {
+                    baroPlotPoints.push([perfData.properties.gps_timestamp, perfData.properties.gps_alt]);
+                    groundPlotPoints.push([perfData.properties.gps_timestamp, perfData.properties.calc_elev_gnd]);
+                }
+
+                $("#uid").html(perfData.properties.uid);
+                var elev_agl = parseInt(perfData.properties.gps_alt) - parseInt(perfData.properties.calc_elev_gnd);
+                $("#gps-alt").html(perfData.properties.gps_alt + " m MSL / " + elev_agl + " m AGL");
+                $("#gps-speed").html(Math.round(parseInt(perfData.properties.gps_speed) * 3.6) + " km/h");
+                $("#gps-course").html(parseInt(perfData.properties.gps_course) + "°");
+                $("#gps-timestamp").html(timestampToTime(perfData.properties.gps_timestamp));
+                var tas = Math.round(parseInt(perfData.properties.opt_tas) * 3.6);
+                if (!isNaN(tas)) {
+                    $("#opt-tas").html(tas + " km/h");
+                }
+                else {
+                    $("#opt-tas").html(' N/A');
+                }
+                var ias = Math.round(parseInt(perfData.properties.opt_ias) * 3.6);
+                if (!isNaN(ias)) {
+                    $("#opt-ias").html(ias + " km/h");
+                }
+                else {
+                    $("#opt-ias").html(" N/A");
+                }
+                if (perfData.properties.opt_c == 0) {
+                    var c = "No";
+                }
+                else {
+                    var c = "Yes";
+                }
+                $("#opt-c").html(c);
+                var cr = parseInt(perfData.properties.opt_cr);
+                if (!isNaN(cr)) {
+                    $("#opt-cr").html(cr + " m/s");
+                }
+                else {
+                    $("#opt-cr").html(" N/A");
+                }
+                var l = parseInt(perfData.properties.l);
+                if (!isNaN(l)) {
+                    $("#opt-l").html(l + " m/s");
+                }
+                else {
+                    $("#opt-l").html(" N/A");
+                }
+                var wd = parseInt(perfData.properties.opt_wd);
+                if (!isNaN(wd)) {
+                    $("#opt-wd").html(wd + "°");
+                }
+                else {
+                    $("#opt-wd").html(" N/A");
+                }
+                var ws = Math.round(parseInt(perfData.properties.opt_ws) * 3.6);
+                if (!isNaN(ws)) {
+                    $("#opt-ws").html(ws + " km/h");
+                }
+                else {
+                    $("#opt-ws").html(" N/A");
+                }
+                var at = perfData.properties.opt_at;
+                switch (at) {
+                    case "0":
+                        at = "Unknown fyling object";
+                        break;
+                    case "1":
+                        at = "Glider/Motor powered glider";
+                        break;
+                    case "2":
+                        at = "Motorglider";
+                        break;
+                    case "3":
+                        at = "Powered airplane";
+                        break;
+                    case "4":
+                        at = "Hang glider";
+                        break;
+                    case "5":
+                        at = "Paraglider";
+                        break;
+                    case "6":
+                        at = "Helicopter";
+                        break;
+                }
+                $("#opt-at").html(at);
+                var status = perfData.properties.calc_flightstatus;
+                switch (status) {
+                    case "0":
+                    case "1":
+                        status = "Did not start";
+                        break;
+                    case "2":
+                        status = "Is flying";
+                        break;
+                    case "3":
+                        status = "Landed";
+                        break;
+                }
+                $("#calc-status").html(status);
+            }
+
+            function _resetPerfData() {
+                trackTargetUID = null;
+                perfData = null;
+                baroPlotPoints = new Array();
+                groundPlotPoints = new Array();
+                baroPlotMaxAlt = 0;
+                $("#uid").html("");
+                $("#opt-at").html("");
+                $("#gps-alt").html("");
+                $("#gps-speed").html("");
+                $("#gps-course").html("");
+                $("#gps-timestamp").html("");
+                $("#opt-tas").html("");
+                $("#opt-ias").html("");
+                $("#opt-c").html("");
+                $("#opt-cr").html("");
+                $("#opt-l").html("");
+                $("#opt-wd").html("");
+                $("#opt-ws").html("");
+                $("#calc-status").html("");
+            };
+
+            function _showGraph() {
+                $("#graph-view").empty();
+                $("#graph-container").fadeIn('fast');
+                $("#graph-container").removeClass('graph-closed');
+                $("#graph-container").addClass('graph-open');
+            }
+
+            function _hideGraph() {
+                $("#graph-container").fadeOut('fast');
+                $("#graph-container").removeClass('graph-open');
+                $("#graph-container").addClass('graph-closed');
+                tracklineLayer.clearLayers();
+                _resetPerfData();
+            }
+
+            function getSize() {
+                var zoomLevel = map.getZoom();
+                switch (true) {
+                    case (zoomLevel > 13):
+                        var size = 90;
+                        break;
+                    case (zoomLevel <= 13 && zoomLevel > 12):
+                        var size = 50;
+                        break;
+                    case (zoomLevel <= 12 && zoomLevel > 9):
+                        var size = 40;
+                        break;
+                    case (zoomLevel <= 9 && zoomLevel > 8):
+                        var size = 30;
+                        break;
+                    case (zoomLevel <= 8):
+                        var size = 20;
+                        break;
+                }
+                return size;
+            }
+
+            //user get feature info map click
+            function onMapClickGetFeatureInfo(e) {
+                delete(popup); //delete old popup if any
+                var popup = new L.Popup({maxWidth: 400});
+                var latlngStr = '(' + e.latlng.lat.toFixed(3) + ', ' + e.latlng.lng.toFixed(3) + ')';
+                var BBOX = map.getBounds()._southWest.lng + "," + map.getBounds()._southWest.lat + "," + map.getBounds()._northEast.lng + "," + map.getBounds()._northEast.lat;
+                var WIDTH = map.getSize().x;
+                var HEIGHT = map.getSize().y;
+                var X = map.layerPointToContainerPoint(e.layerPoint).x;
+                var Y = map.layerPointToContainerPoint(e.layerPoint).y;
+
+                var request_url = 'https://maps.openaip.net/service/public/mapdata/wms';
+                var params = {
+                    request: 'GetFeatureInfo',
+                    VERSION: '1.1.1',
+                    FORMAT: 'image/png',
+                    LAYERS: 'openaip_approved_airports,openaip_approved_hotspots',
+                    QUERY_LAYERS: 'openaip_approved_airports,openaip_approved_hotspots',
+                    INFO_FORMAT: 'application/json',
+                    SRS: 'EPSG:4326',
+                    FEATURE_COUNT: '1',
+                    WIDTH: WIDTH,
+                    HEIGHT: HEIGHT,
+                    BBOX: BBOX,
+                    X: X,
+                    Y: Y
+                    //            MODE:'nquery',
+                    //            QFORMAT:'geojson'
+                };
+
+                //build object from ajax getFeatureInfo response
+                var response = $.get(request_url, params, function (response, status, xhr) {
+                    if (status == "error") {
+                        var msg = "Sorry but there was an error: ";
+                        $("#error-dialog").dialog("open").html(msg + xhr.status + " " + xhr.statusText);
+                    }
+                    else if (status == "success") {
+                        var jsonResponseObj = response; // response is already JSON object!
+                        if (jsonResponseObj) { //ensure only popups for found features (that results in a valid JSON object) are shown
+                            //build popup content from JSON object
+                            //airports
+                            if (jsonResponseObj.layer.name === 'spat_apt_rrp') {
+
+                                var aptNid = jsonResponseObj.layer.features[0]['nid'];
+                                var aptTitle = jsonResponseObj.layer.features[0]['title']; //select only ONE feature for now!
+                                var aptIcaoCode = jsonResponseObj.layer.features[0]['code'];
+                                var aptElev = jsonResponseObj.layer.features[0]['elev'];
+                                var aptTwrFreq = jsonResponseObj.layer.features[0]['freq_twr'];
+                                var aptRwyLength = jsonResponseObj.layer.features[0]['rwy_length'];
+                                var aptRwyWidth = jsonResponseObj.layer.features[0]['rwy_width'];
+                                //runway surfaces
+                                var rwySurfaces = [
+                                    'not defined', //set index[0] as not defined
+                                    'ASPH',
+                                    'GRAS',
+                                    'CONC',
+                                    'ICE',
+                                    'GRVL',
+                                    'SAND',
+                                    'SNOW',
+                                    'SOIL',
+                                    'UNKN',
+                                    'WATE'
+                                ]
+                                var aptRwySurface = rwySurfaces[jsonResponseObj.layer.features[0]['rwy_surface']];
+
+                                var popupContent = '<div class="popup-content-ctn">' +
+                                    '<a class="apt-title popup-line" href="https://www.openaip.net/node/' + aptNid + '">' + aptTitle + '</a>' + "  " + '<span class="apt-icao-code">' + aptIcaoCode + '</span>'
+                                    + '<div class="popup-detail-title popup-line">Elevation:</div>' + '<div class="apt-elev popup-line">' + "\&nbsp" + aptElev + ' m MSL</div>'
+                                    + '<div class="popup-detail-title popup-line">Frequency:</div>' + '<div class="apt-twr-freq popup-line">' + "\&nbsp" + aptTwrFreq + ' MHz </div>'
+                                    + '<div class="popup-detail-title popup-line">Runway:</div>' + '<div class="apt-rwy popup-line">' + "\&nbsp" + aptRwyLength + ' x ' + aptRwyWidth + ' m' + ' ' + aptRwySurface + '</div>'
+                                    + '</div>';
+                            }
+                            //build hotspot popup content
+                            else if (jsonResponseObj.layer.name === 'spat_hotspot') {
+
+                                var hotNid = jsonResponseObj.layer.features[0]['nid'];
+                                var hotTitle = jsonResponseObj.layer.features[0]['title'];
+                                var hotElev = jsonResponseObj.layer.features[0]['elevation'];
+                                var hotspotTypes = [
+                                    'natural',
+                                    'artificial'
+                                ]
+                                var hotType = hotspotTypes[jsonResponseObj.layer.features[0]['type']];
+                                var rlbtly = [
+                                    'poor (<20%)',
+                                    'fair (20% - 50%)',
+                                    'high (50% - 80%)',
+                                    'very high (>80%)'
+                                ]
+                                var hotRlblty = rlbtly[jsonResponseObj.layer.features[0]['rlblty']];
+                                var occurence = [
+                                    'irregular interval',
+                                    'scheduled interval',
+                                    'nearly constant'
+                                ]
+                                var hotOccurence = occurence[jsonResponseObj.layer.features[0]['occurence']];
+                                //build worktimes
+                                var worktime = [
+                                    'morning/noon',
+                                    'noon/afternoon',
+                                    'afternoon/late afternoon',
+                                    'evening'
+                                ]
+                                var hotWorktime = new Array();
+                                if (jsonResponseObj.layer.features[0]['worktime_1'] == '1') {
+                                    hotWorktime.push(worktime[0]);
+                                }
+                                if (jsonResponseObj.layer.features[0]['worktime_2'] == '1') {
+                                    hotWorktime.push(worktime[1]);
+                                }
+                                if (jsonResponseObj.layer.features[0]['worktime_3'] == '1') {
+                                    hotWorktime.push(worktime[2]);
+                                }
+                                if (jsonResponseObj.layer.features[0]['worktime_4'] == '1') {
+                                    hotWorktime.push(worktime[3]);
+                                }
+                                if (hotWorktime.length < 1) { //set text for empty values if array is empty
+                                    var hotWorktimes = 'All day';
+                                }
+                                else {
+                                    var hotWorktimes = hotWorktime; //this array includes all hotspot worktimes
+                                }
+
+                                //build best wind directions
+                                var windDirs = [
+                                    'wind_dir_n',
+                                    'wind_dir_ne',
+                                    'wind_dir_e',
+                                    'wind_dir_se',
+                                    'wind_dir_s',
+                                    'wind_dir_sw',
+                                    'wind_dir_w',
+                                    'wind_dir_nw'
+                                ]
+                                var hotWindDirs = new Array();
+                                if (jsonResponseObj.layer.features[0]['wind_dir_n'] == '360') {
+                                    hotWindDirs.push('N');
+                                }
+                                if (jsonResponseObj.layer.features[0]['wind_dir_ne'] == '45') {
+                                    hotWindDirs.push('NE');
+                                }
+                                if (jsonResponseObj.layer.features[0]['wind_dir_e'] == '90') {
+                                    hotWindDirs.push('E');
+                                }
+                                if (jsonResponseObj.layer.features[0]['wind_dir_se'] == '135') {
+                                    hotWindDirs.push('SE');
+                                }
+                                if (jsonResponseObj.layer.features[0]['wind_dir_s'] == '180') {
+                                    hotWindDirs.push('S');
+                                }
+                                if (jsonResponseObj.layer.features[0]['wind_dir_sw'] == '225') {
+                                    hotWindDirs.push('SW');
+                                }
+                                if (jsonResponseObj.layer.features[0]['wind_dir_w'] == '270') {
+                                    hotWindDirs.push('W');
+                                }
+                                if (jsonResponseObj.layer.features[0]['wind_dir_w'] == '315') {
+                                    hotWindDirs.push('NW');
+                                }
+                                if (hotWindDirs.length < 1) { //set text for empty values if array is empty
+                                    var hotWindDirections = 'All directions';
+                                }
+                                else {
+                                    var hotWindDirections = hotWindDirs; //this array includes all best hotspot wind directions
+                                }
+                                var popupContent = '<div class="popup-content-ctn">' +
+                                    '<a class="hot-title popup-line" href="https://www.openaip.net/node/' + hotNid + '">' + hotTitle + '</a>' + "  " + '<span class="hot-type">' + hotType + '</span>'
+                                    + '<div class="popup-detail-title popup-line">Elevation:</div>' + '<div class="hot-elev popup-line">' + "\&nbsp" + hotElev + ' m MSL</div>'
+                                    + '<div class="popup-detail-title popup-line">Reliability:</div>' + '<div class="hot-rlblty popup-line">' + "\&nbsp" + hotRlblty + '</div>'
+                                    + '<div class="popup-detail-title popup-line">Occurence:</div>' + '<div class="hot-occurence popup-line">' + "\&nbsp" + hotOccurence + '</div>'
+                                    + '<div class="popup-detail-title favourable-cond popup-line">Favourable Conditions:</div>'
+                                    + '<div class="popup-detail-title favourable-cond popup-line">Wind directions:</div>' + '<div class="hot-wind popup-line">' + "\&nbsp" + hotWindDirections + '</div>'
+                                    + '<div class="popup-detail-title favourable-cond popup-line">Time of day:</div>' + '<div class="hot-worktime popup-line">' + "\&nbsp" + hotWorktimes + '</div>'
+                                    + '</div>';
+                            }
+                            if (popupContent) {
+                                //build popup
+                                popup.setLatLng(e.latlng);
+                                popup.setContent(popupContent);
+                                map.openPopup(popup);
+                            }
+                        }
+                    }
+                });
+            }
+
+            function setCurrentBBOX() {
+                currentBBOX = _getProjBbox(900913);
+            }
+
+            function showAirspaceLabels() {
+                if (map.getZoom() >= 12 && !map.hasLayer(openaip_airspace_labels)) {
+                    openaip_airspace_labels.addTo(map);
+                }
+                else {
+                    openaip_airspace_labels.redraw();
+                }
+            }
+
+            function _getProjBbox(epsgCode) {
+                if (!epsgCode) {
+                    return false;
+                }
+                if (epsgCode == 900913) {
+                    var projPointNorthEast = L.CRS.EPSG900913.project(map.getBounds().getNorthEast());
+                    var projPointSouthWest = L.CRS.EPSG900913.project(map.getBounds().getSouthWest());
+                }
+                else {
+                    return false;
+                }
+                var projBbox = projPointSouthWest.x + ',' + projPointSouthWest.y + ',' + projPointNorthEast.x + ',' + projPointNorthEast.y;
+                return projBbox;
+            }
+
+            var userLocation = new L.Marker(); //new user location marker
+            function markerUserLocation() {
+                //user geolocation handling
+                map.locate({
+                    setView: true,
+                    maxZoom: 11,
+                    enableHighAccuracy: true
+                });
+                map.on('locationfound', function (e) {
+                    userLocation.setLatLng(e.latlng);
+                    map.addLayer(userLocation);
+                });
+                map.on('locationerror', function (e) {
+                    //no error message, we fail silently and map will be centered to Sandhausen
+                });
+            }
+
+            function getLayerByName(layerName) {
+                switch (layerName) {
+                    case 'openaip_ext_owm_precipitation':
+                        return openaip_ext_owm_precipitation;
+                        break;
+                    case 'openaip_ext_owm_pressurenn':
+                        return openaip_ext_owm_pressurenn;
+                        break;
+                    case 'openaip_cached_hotspot':
+                        return openaip_cached_hotspot;
+                        break;
+                    case 'trackingLayer':
+                        return trackingLayer
+                        break;
+                }
+            }
+
+            function getUrlParams() {
+                var params = {};
+                window.location.search.replace(/[?&]+([^=&]+)=([^&]*)/gi, function (str, key, value) {
+                    params[key] = value;
+                });
+
+                return params;
+            }
+
+            function setActiveSearchFilter() {
+                activeSearchFilter = document.getElementsByClassName('filterActive')[0].getAttribute('filter');
+            }
+
+            function isEmpty(obj) {
+                var hasOwnProperty = Object.prototype.hasOwnProperty;
+                // null and undefined are empty
+                if (obj == null) return true;
+                // Assume if it has a length property with a non-zero value
+                // that that property is correct.
+                if (obj.length && obj.length > 0)    return false;
+                if (obj.length === 0)  return true;
+
+                for (var key in obj) {
+                    if (hasOwnProperty.call(obj, key))    return false;
+                }
+
+                return true;
+            }
+
+            function timestampToTime(timestamp) {
+                // create a new javascript Date object based on the timestamp
+                // multiplied by 1000 so that the argument is in milliseconds, not seconds
+                var date = new Date(timestamp * 1000);
+                // hours part from the timestamp
+                var hours = date.getHours();
+                // minutes part from the timestamp
+                var minutes = (date.getMinutes() < 10 ? '0' : '') + date.getMinutes();
+                // seconds part from the timestamp
+                var seconds = (date.getSeconds() < 10 ? '0' : '') + date.getSeconds();
+                // will display time in 10:30:23 format
+                return hours + ':' + minutes + ':' + seconds;
+
+
+            }
+});
+    </script>
+</body>
+</html>
+
